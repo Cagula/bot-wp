@@ -7,6 +7,10 @@ import fs from "fs"
 let globalSpam = false
 let globalDelay = 1000
 
+async function sleep(ms) {
+    return new Promise(r => setTimeout(r, ms))
+}
+
 async function startBot() {
     const { state, saveCreds } = await useMultiFileAuthState("./auth")
     const { version } = await fetchLatestBaileysVersion()
@@ -19,13 +23,16 @@ async function startBot() {
 
     sock.ev.on("creds.update", saveCreds)
 
-    // LOGIN FĂRĂ QR — NUMĂR + COD SMS
+    // LOGIN FĂRĂ QR — FIX PENTRU RENDER
     if (!sock.authState.creds.registered) {
         const phone = process.env.PHONE
         if (!phone) {
             console.log("Setează PHONE=+40xxxx în Render → Environment Variables")
             process.exit(0)
         }
+
+        console.log("Aștept 5 secunde ca WhatsApp să deschidă conexiunea...")
+        await sleep(5000)
 
         const pairingCode = await sock.requestPairingCode(phone)
         console.log("Cod primit:", pairingCode)
@@ -54,7 +61,7 @@ async function startBot() {
                 if (!globalSpam) break
                 await sock.sendMessage(jid, { text: msg })
                 console.log("Trimis:", msg)
-                await new Promise(r => setTimeout(r, globalDelay))
+                await sleep(globalDelay)
             }
         }
 
