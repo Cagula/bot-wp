@@ -1,290 +1,118 @@
-const {
-  default: makeWASocket,
-  useMultiFileAuthState,
-  DisconnectReason,
-  fetchLatestBaileysVersion
-} = require("@whiskeysockets/baileys");
+import makeWASocket, {
+    useMultiFileAuthState,
+    fetchLatestBaileysVersion
+} from "@whiskeysockets/baileys"
+import fs from "fs"
 
-const fs = require("fs");
-const path = require("path");
-const pino = require("pino");
-const chalk = require("chalk");
+let globalSpam = false
+let globalDelay = 1000
 
-// -------------------------------
-// SISTEM START / STOP / PERMISII
-// -------------------------------
-let botActive = true;
-let allowedUsers = new Set();
-let allowAllGroup = false;
-
-// Delay spam (default 0.5 sec)
-let spamDelay = 500;
-
-// -------------------------------
-// PORNIRE BOT
-// -------------------------------
 async function startBot() {
-  const { state, saveCreds } = await useMultiFileAuthState("./auth");
-  const { version } = await fetchLatestBaileysVersion();
+    const { state, saveCreds } = await useMultiFileAuthState("./auth")
+    const { version } = await fetchLatestBaileysVersion()
 
-  const sock = makeWASocket({
-    logger: pino({ level: "silent" }),
-    auth: state,
-    version
-  });
+    const sock = makeWASocket({
+        version,
+        auth: state,
+        printQRInTerminal: false
+    })
 
-  // 🔥 QR manual
-  sock.ev.on("connection.update", (update) => {
-    const { qr, connection } = update;
-    if (qr) {
-      console.log("📱 Scan QR-ul de mai jos pentru a conecta WhatsApp:");
-      console.log(qr);
+    sock.ev.on("creds.update", saveCreds)
+
+    // LOGIN FĂRĂ QR — NUMĂR + COD SMS
+    if (!sock.authState.creds.registered) {
+        const phone = process.env.PHONE
+        if (!phone) {
+            console.log("Setează PHONE=+40xxxx în Render → Environment Variables")
+            process.exit(0)
+        }
+
+        const pairingCode = await sock.requestPairingCode(phone)
+        console.log("Cod primit:", pairingCode)
+        console.log("Scrie codul primit aici în consola Render:")
+
+        process.stdin.once("data", async (data) => {
+            const code = data.toString().trim()
+            await sock.confirmPairingCode(code)
+            console.log("Autentificat fără QR!")
+        })
     }
-    if (connection === "open") {
-      console.log(chalk.green("✅ Conectat cu succes la WhatsApp!"));
+
+    console.log("Bot pornit pe Render!")
+
+    // CITIRE SPAM.TXT
+    const spamLines = fs.readFileSync("spam.txt", "utf8")
+        .split("\n")
+        .filter(x => x.trim() !== "")
+
+    async function spam(jid) {
+        globalSpam = true
+        console.log("Spam pornit către:", jid)
+
+        while (globalSpam) {
+            for (const msg of spamLines) {
+                if (!globalSpam) break
+                await sock.sendMessage(jid, { text: msg })
+                console.log("Trimis:", msg)
+                await new Promise(r => setTimeout(r, globalDelay))
+            }
+        }
+
+        console.log("Spam oprit.")
     }
-    if (connection === "close") {
-      console.log(chalk.yellow("🔄 Reconectare..."));
-      startBot();
-    }
-  });
 
-  sock.ev.on("creds.update", saveCreds);
+    sock.ev.on("messages.upsert", async ({ messages }) => {
+        const m = messages[0]
+        if (!m.message) return
 
-  // -------------------------------
-  // HANDLER MESAJ
-  // -------------------------------
-  sock.ev.on("messages.upsert", async ({ messages }) => {
-    const msg = messages[0];
-    if (!msg.message) return;
+        const from = m.key.remoteJid
+        const text =
+            m.message.conversation ||
+            m.message.extendedTextMessage?.text ||
+            ""
 
-    const chatId = msg.key.remoteJid;
-    const isGroup = chatId.endsWith("@g.us");
-    const isPrivate = chatId.endsWith("@s.whatsapp.net");
-    const sender = msg.key.participant || msg.key.remoteJid;
+        // STOP
+        if (text === "stop") {
+            globalSpam = false
+            await sock.sendMessage(from, { text: "Spam oprit." })
+        }
 
-    if (!isGroup && !isPrivate) return;
+        // START NUMĂR
+        if (text.startsWith("start ")) {
+            const nr = text.split(" ")[1]
+            const jid = nr + "@s.whatsapp.net"
+            spam(jid)
+        }
 
-    const text = extractMessage(msg.message);
-    if (!text) return;
+        // START @USER
+        if (text.startsWith("start @")) {
+            const tag = m.message.extendedTextMessage?.contextInfo?.mentionedJid?.[0]
+            if (tag) spam(tag)
+        }
 
-    await handleCommand(sock, chatId, text.toLowerCase(), isGroup, msg, sender);
-  });
+        // START @ALL
+        if (text === "start @all") {
+            const group = await sock.groupMetadata(from)
+            for (const p of group.participants) {
+                spam(p.id)
+            }
+        }
+
+        // START NUMERIC (start1, start2, start30 etc)
+        if (text.startsWith("start")) {
+            const num = text.replace("start", "")
+            if (!isNaN(num)) {
+                globalDelay = Number(num) * 1000
+                spam(from)
+            }
+        }
+
+        // .vv = spam ultra rapid (delay 0)
+        if (text === ".vv") {
+            globalDelay = 0
+            spam(from)
+        }
+    })
 }
 
-// -------------------------------
-// EXTRACTOR MESAJ
-// -------------------------------
-function extractMessage(message) {
-  try {
-    if (message.conversation) return message.conversation;
-    if (message.extendedTextMessage) return message.extendedTextMessage.text;
-    if (message.imageMessage?.caption) return message.imageMessage.caption;
-    if (message.videoMessage?.caption) return message.videoMessage.caption;
-    return null;
-  } catch {
-    return null;
-  }
-}
-
-// -------------------------------
-// HANDLER COMENZI
-// -------------------------------
-async function handleCommand(sock, chatId, text, isGroup, msg, sender) {
-
-  // SETARE DELAY SPAM
-  if (text.startsWith("/spam")) {
-    const value = text.replace("/spam", "").trim();
-    if (!value || isNaN(value)) {
-      await sock.sendMessage(chatId, { text: "⚠ Folosește: /spam5 /spam10 /spam0.5" });
-      return;
-    }
-    spamDelay = Number(value) * 1000;
-    await sock.sendMessage(chatId, { text: `⏱ Delay spam setat la ${value} secunde!` });
-    return;
-  }
-
-  // STOP
-  if (text === "!stop") {
-    botActive = false;
-    allowedUsers.clear();
-    allowAllGroup = false;
-    await sock.sendMessage(chatId, { text: "⛔ Bot oprit!" });
-    return;
-  }
-
-  // START
-  if (text === "!start") {
-    botActive = true;
-    await sock.sendMessage(chatId, { text: "✅ Bot pornit!" });
-    return;
-  }
-
-  // START @user
-  if (text.startsWith("!start @")) {
-    const mentioned = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid;
-    if (!mentioned) {
-      await sock.sendMessage(chatId, { text: "⚠ Trebuie să menționezi un user!" });
-      return;
-    }
-    mentioned.forEach(u => allowedUsers.add(u));
-    await sock.sendMessage(chatId, {
-      text: `👤 Bot pornit pentru: ${mentioned.map(u => "@" + u.split("@")[0]).join(", ")}`,
-      mentions: mentioned
-    });
-    return;
-  }
-
-  // START @all
-  if (text === "!start @all") {
-    if (!isGroup) {
-      await sock.sendMessage(chatId, { text: "⚠ Comanda merge doar pe grup!" });
-      return;
-    }
-    allowAllGroup = true;
-    await sock.sendMessage(chatId, { text: "👥 Bot activ pentru toți membrii grupului!" });
-    return;
-  }
-
-  // FILTRARE PERMISII
-  if (!botActive) return;
-  if (isGroup && !allowAllGroup && !allowedUsers.has(sender)) return;
-
-  // SPAM TEXT
-  if (text.startsWith("!spam ")) {
-    const fileName = text.split(" ")[1];
-    const filePath = path.join(__dirname, "spam", fileName);
-    if (!fs.existsSync(filePath)) {
-      await sock.sendMessage(chatId, { text: "⚠ Fișierul nu există!" });
-      return;
-    }
-    const lines = fs.readFileSync(filePath, "utf8").split("\n");
-    await sock.sendMessage(chatId, { text: `🚀 Pornesc spam-ul din: ${fileName}` });
-    for (const line of lines) {
-      if (!botActive) break;
-      await sock.sendMessage(chatId, { text: line.trim() });
-      await delay(spamDelay);
-    }
-    await sock.sendMessage(chatId, { text: "✅ Spam finalizat!" });
-    return;
-  }
-
-  // SPAM MEDIA
-  if (text.startsWith("!spammedia ")) {
-    const folderName = text.split(" ")[1];
-    const folderPath = path.join(__dirname, "spam", folderName);
-    if (!fs.existsSync(folderPath)) {
-      await sock.sendMessage(chatId, { text: "⚠ Folderul nu există!" });
-      return;
-    }
-    const files = fs.readdirSync(folderPath);
-    await sock.sendMessage(chatId, { text: `📸 Pornesc spam media din: ${folderName}` });
-    for (const file of files) {
-      if (!botActive) break;
-      const filePath = path.join(folderPath, file);
-      const buffer = fs.readFileSync(filePath);
-      if (file.endsWith(".jpg") || file.endsWith(".png")) {
-        await sock.sendMessage(chatId, { image: buffer });
-      } else if (file.endsWith(".mp4")) {
-        await sock.sendMessage(chatId, { video: buffer });
-      }
-      await delay(spamDelay);
-    }
-    await sock.sendMessage(chatId, { text: "✅ Spam media finalizat!" });
-    return;
-  }
-
-  // SPAM RAPID
-  if (text.startsWith("!spamfast ")) {
-    const fileName = text.split(" ")[1];
-    const filePath = path.join(__dirname, "spam", fileName);
-    if (!fs.existsSync(filePath)) {
-      await sock.sendMessage(chatId, { text: "⚠ Fișierul nu există!" });
-      return;
-    }
-    const lines = fs.readFileSync(filePath, "utf8").split("\n");
-    await sock.sendMessage(chatId, { text: `⚡ Pornesc spam-ul rapid din: ${fileName}` });
-    for (const line of lines) {
-      if (!botActive) break;
-      await sock.sendMessage(chatId, { text: line.trim() });
-    }
-    await sock.sendMessage(chatId, { text: "⚡ Spam rapid finalizat!" });
-    return;
-  }
-
-  // SPAM RANDOM
-  if (text.startsWith("!spamrandom ")) {
-    const fileName = text.split(" ")[1];
-    const filePath = path.join(__dirname, "spam", fileName);
-    if (!fs.existsSync(filePath)) {
-      await sock.sendMessage(chatId, { text: "⚠ Fișierul nu există!" });
-      return;
-    }
-    const lines = fs.readFileSync(filePath, "utf8").split("\n");
-    await sock.sendMessage(chatId, { text: `🎲 Pornesc spam random din: ${fileName}` });
-    for (let i = 0; i < 50; i++) {
-      if (!botActive) break;
-      const randomLine = lines[Math.floor(Math.random() * lines.length)];
-      await sock.sendMessage(chatId, { text: randomLine.trim() });
-      await delay(spamDelay);
-    }
-    await sock.sendMessage(chatId, { text: "🎲 Spam random finalizat!" });
-    return;
-  }
-
-  // VIEW ONCE BYPASS (.vv)
-if (text === ".vv") {
-  try {
-    const ctx = msg.message?.extendedTextMessage?.contextInfo;
-    if (!ctx || !ctx.stanzaId) {
-      await sock.sendMessage(chatId, { text: "⚠ Folosește .vv ca reply la o poză/video view-once!" });
-      return;
-    }
-
-    const targetMsg = await sock.loadMessage(chatId, ctx.stanzaId);
-
-    if (!targetMsg?.message?.viewOnceMessageV2) {
-      await sock.sendMessage(chatId, { text: "⚠ Mesajul nu este view-once!" });
-      return;
-    }
-
-    const real = targetMsg.message.viewOnceMessageV2.message;
-
-    if (real.imageMessage) {
-      const buffer = await sock.downloadMediaMessage({ message: real });
-      await sock.sendMessage(chatId, { image: buffer, caption: "🔓 View-once deblocat!" });
-    }
-
-    if (real.videoMessage) {
-      const buffer = await sock.downloadMediaMessage({ message: real });
-      await sock.sendMessage(chatId, { video: buffer, caption: "🔓 View-once deblocat!" });
-    }
-
-  } catch (e) {
-    await sock.sendMessage(chatId, { text: "❌ Eroare la deblocarea view-once!" });
-    console.log("VV ERROR:", e);
-  }
-
-  return;
-}
-
-// -------------------------------
-// COMENZI SIMPLE
-// -------------------------------
-if (text === "!ping") {
-  await sock.sendMessage(chatId, { text: "🏓 Pong!" });
-}
-
-if (text === "!status") {
-  await sock.sendMessage(chatId, {
-    text: isGroup ? "👥 Bot activ pe grup!" : "💬 Bot activ în privat!"
-  });
-}
-}
-
-// -------------------------------
-function delay(ms) {
-  return new Promise(r => setTimeout(r, ms));
-}
-
-startBot();
+startBot()
