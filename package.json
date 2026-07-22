@@ -1,14 +1,13 @@
 {
-  "name": "cagulabot",
+  "name": "bot-wp",
   "version": "1.0.0",
-  "description": "WhatsApp Bot by Cagula",
   "main": "index.js",
+  "type": "module",
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
-    "@whiskeysockets/baileys": "^6.7.8",
-    "pino": "^8.0.0",
-    "chalk": "^5.0.0"
+    "@whiskeysockets/baileys": "^6.6.0",
+    "pino": "^8.0.0"
   }
 }
