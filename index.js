@@ -233,6 +233,58 @@ async function handleCommand(sock, chatId, text, isGroup, msg, sender) {
   }
 
   // VIEW ONCE BYPASS (.vv)
-  if (text === ".vv") {
-    try {
-      const ctx =
+if (text === ".vv") {
+  try {
+    const ctx = msg.message?.extendedTextMessage?.contextInfo;
+    if (!ctx || !ctx.stanzaId) {
+      await sock.sendMessage(chatId, { text: "⚠ Folosește .vv ca reply la o poză/video view-once!" });
+      return;
+    }
+
+    const targetMsg = await sock.loadMessage(chatId, ctx.stanzaId);
+
+    if (!targetMsg?.message?.viewOnceMessageV2) {
+      await sock.sendMessage(chatId, { text: "⚠ Mesajul nu este view-once!" });
+      return;
+    }
+
+    const real = targetMsg.message.viewOnceMessageV2.message;
+
+    if (real.imageMessage) {
+      const buffer = await sock.downloadMediaMessage({ message: real });
+      await sock.sendMessage(chatId, { image: buffer, caption: "🔓 View-once deblocat!" });
+    }
+
+    if (real.videoMessage) {
+      const buffer = await sock.downloadMediaMessage({ message: real });
+      await sock.sendMessage(chatId, { video: buffer, caption: "🔓 View-once deblocat!" });
+    }
+
+  } catch (e) {
+    await sock.sendMessage(chatId, { text: "❌ Eroare la deblocarea view-once!" });
+    console.log("VV ERROR:", e);
+  }
+
+  return;
+}
+
+// -------------------------------
+// COMENZI SIMPLE
+// -------------------------------
+if (text === "!ping") {
+  await sock.sendMessage(chatId, { text: "🏓 Pong!" });
+}
+
+if (text === "!status") {
+  await sock.sendMessage(chatId, {
+    text: isGroup ? "👥 Bot activ pe grup!" : "💬 Bot activ în privat!"
+  });
+}
+}
+
+// -------------------------------
+function delay(ms) {
+  return new Promise(r => setTimeout(r, ms));
+}
+
+startBot();
